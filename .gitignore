@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+ephe/*.se1
+# Exception: Chiron's asteroid ephemeris is REQUIRED (it has no Moshier
+# fallback, unlike Sun-Pluto). It is small (~220 KB) and must ship in the
+# Docker image, so it has to be tracked.
+!ephe/seas_18.se1
+ephe/sefstars.txt
