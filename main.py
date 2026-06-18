@@ -72,6 +72,13 @@ PLANETS_ACG = {
     "MeanNode": swe.MEAN_NODE,  # Mean lunar node (as used by astro.com)
 }
 
+# Extra modern/Western bodies, computed only when requested via `extra_bodies`.
+# NOT part of the Vedic PLANETS set above (Jyotish does not use these).
+EXTRA_BODIES = {
+    "Chiron": swe.CHIRON,
+    "Lilith": swe.MEAN_APOG,  # Mean Black Moon Lilith (mean lunar apogee)
+}
+
 # Ayanamsa systems
 AYANAMSA_SYSTEMS = {
     "lahiri": swe.SIDM_LAHIRI,
@@ -102,6 +109,7 @@ class CalculateRequest(BaseModel):
     utc_offset_hours: Optional[float] = Field(None, description="UTC offset of birth timezone (e.g. 1.0 for CET). If None, auto-detected from coordinates + date.")
     ayanamsa: str = Field("lahiri", description="Ayanamsa system")
     house_system: str = Field("whole_sign", description="House system")
+    extra_bodies: Optional[list[str]] = Field(None, description="Extra bodies to also compute (e.g. Chiron, Lilith) for the Western chart")
 
 
 class PlanetPosition(BaseModel):
@@ -277,6 +285,12 @@ def calculate(req: CalculateRequest):
 
     # Mark Rahu as always retrograde
     rahu.retrograde = True
+
+    # ── Extra Western/modern bodies (Chiron, Lilith) on request ──
+    for name in (req.extra_bodies or []):
+        pid = EXTRA_BODIES.get(name)
+        if pid is not None:
+            planets.append(calc_planet(pid, name, jd, aya_val, flags))
 
     # ── Lagna + Houses ──
     lagna: Optional[LagnaResult] = None
