@@ -153,6 +153,7 @@ class CalculateResponse(BaseModel):
     reference_ayanamsa: Optional[float]
     reference_moon: Optional[PlanetPosition]
     reference_planets: Optional[list[PlanetPosition]]
+    vertex_tropical: Optional[float] = None  # ascmc[3] from swe.houses - the Western Vertex point
 
 
 # ─── Helpers ─────────────────────────────────────────────────────
@@ -295,14 +296,16 @@ def calculate(req: CalculateRequest):
     # ── Lagna + Houses ──
     lagna: Optional[LagnaResult] = None
     houses: Optional[list[HouseCusp]] = None
+    vertex_trop: Optional[float] = None
 
     if req.birth_lat is not None and req.birth_lng is not None and req.birth_time:
         house_sys_byte = HOUSE_SYSTEMS[house_key]
 
         cusps, ascmc = swe.houses(jd, req.birth_lat, req.birth_lng, house_sys_byte)
 
-        # ascmc[0] = Ascendant (tropical)
+        # ascmc[0] = Ascendant (tropical); ascmc[3] = Vertex (tropical)
         asc_trop = ascmc[0]
+        vertex_trop = ascmc[3]
         asc_sid = sidereal_lon(asc_trop, aya_val)
         asc_rashi = int(asc_sid / 30)
         asc_deg_in_sign = asc_sid % 30
@@ -390,6 +393,7 @@ def calculate(req: CalculateRequest):
         reference_julian_day=round(ref_jd, 6) if ref_jd else None,
         reference_ayanamsa=round(ref_aya, 6) if ref_aya else None,
         reference_moon=ref_moon,
+        vertex_tropical=round(vertex_trop, 4) if vertex_trop is not None else None,
         reference_planets=ref_planets,
     )
 
