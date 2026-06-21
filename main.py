@@ -702,13 +702,14 @@ def _auto_utc_offset(lat: float, lng: float, date_str: str, time_str: str) -> fl
     """Resolve the EXACT UTC offset from coordinates + date/time (IANA timezone).
 
     Astrocartography is offset-sensitive, so we never approximate: if the
-    timezone can't be resolved precisely we raise, so the caller gets a clear
-    error instead of subtly-wrong lines. (Prefer passing utc_offset_hours from
-    the app, which avoids this path entirely.)
+    timezone can't be resolved precisely we raise HTTPException(422), so the
+    caller gets a clean 4xx (not an unhandled 500) for unresolvable input such as
+    open-ocean coordinates. (Prefer passing utc_offset_hours from the app, which
+    avoids this path entirely.)
     """
     tz_name = _tf.timezone_at(lat=lat, lng=lng)
     if not tz_name:
-        raise ValueError(f"Could not resolve IANA timezone for coordinates ({lat}, {lng})")
+        raise HTTPException(422, f"Could not resolve IANA timezone for coordinates ({lat}, {lng})")
 
     parts = date_str.split("-")
     year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
@@ -721,7 +722,7 @@ def _auto_utc_offset(lat: float, lng: float, date_str: str, time_str: str) -> fl
     dt = datetime(year, month, day, hour, minute, tzinfo=tz)
     offset = dt.utcoffset()
     if offset is None:
-        raise ValueError(f"Could not compute UTC offset for timezone {tz_name}")
+        raise HTTPException(422, f"Could not compute UTC offset for timezone {tz_name}")
     return offset.total_seconds() / 3600.0
 
 
