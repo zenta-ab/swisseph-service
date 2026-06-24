@@ -48,6 +48,22 @@ if _cors_origins:
         allow_headers=["*"],
     )
 
+
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Make failures diagnosable. Instead of a generic 500 with no detail, log the
+    full traceback to the container log (visible in Coolify) AND return the concrete
+    error type + message in the body. This is an INTERNAL service (called server-to-
+    server), so returning the detail to the trusted backend is safe and is what lets
+    the calling app log WHY a call like /design-date failed for a given birth date.
+    """
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=500, content={"detail": f"{type(exc).__name__}: {exc}"})
+
 # ─── Planet mapping ──────────────────────────────────────────────
 
 # Vedic planets (used by /calculate - verified against reference charts, DO NOT MODIFY)
