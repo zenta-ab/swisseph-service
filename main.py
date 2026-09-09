@@ -33,6 +33,191 @@ EPHE_PATH = os.path.abspath(os.environ.get(
 ))
 swe.set_ephe_path(EPHE_PATH)
 
+# ─── Ephemeris precision (source detection) ──────────────────
+
+# Make our log lines actually reach the container log. uvicorn configures its own
+# loggers but leaves the root logger without a handler, so anything below WARNING
+# from this module would be dropped on the floor. Only configure if nothing else has.
+_LOG_LEVEL = os.environ.get("SWISSEPH_LOG_LEVEL", "INFO").upper()
+if _LOG_LEVEL not in ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"):
+    _LOG_LEVEL = "INFO"
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=_LOG_LEVEL, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+logger.setLevel(_LOG_LEVEL)
+
+# Data files that FLG_SWIEPH needs for full precision on the bodies this service
+# returns. When they are absent pyswisseph does NOT fail: it silently switches to
+# the built-in Moshier analytical theory and returns numbers that look perfectly
+# plausible, with no marker anywhere in the response body. Every helper below
+# exists to make that switch visible instead of silent.
+EPHE_REQUIRED_FILES = ("sepl_18.se1", "semo_18.se1")  # planets + Moon, 1800-2399 CE
+EPHE_OPTIONAL_FILES = ("seas_18.se1",)                # asteroids (Chiron), no Moshier fallback
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+# Does reduced precision count as a failure? Default NO, deliberately.
+#
+# .gitignore excludes ephe/*.se1 on purpose and keeps only seas_18.se1, because
+# Chiron has no analytical fallback while Sun to Pluto do. So the Moshier fallback
+# is the intended configuration, not an accident, and flagging it as "failed"
+# would cry wolf on every deploy.
+#
+# The margins justify that choice. Moshier deviates from JPL by about 0.1 arcsec
+# for the planets and about 3 arcsec for the Moon; the ephemeris files would buy
+# 0.001 arcsec. The finest thing any caller reads is a Human Design tone at 93.75
+# arcsec, and the two tone-bearing arrows come from the Sun, whose error is ~0.1
+# arcsec, i.e. about a thousandth of a tone. Nakshatra padas (12000 arcsec) and
+# gate boundaries (20250 arcsec) are orders of magnitude coarser still.
+#
+# Set SWISSEPH_REQUIRE_FULL_PRECISION=true if you ship the files and want the
+# service to insist on them; the check then reports "failed" instead of "degraded".
+REQUIRE_FULL_PRECISION = _env_flag("SWISSEPH_REQUIRE_FULL_PRECISION", False)
+
+# Sun, Moon and the true node are the bodies whose precision the callers are most
+# sensitive to (Human Design tones, nakshatra padas, Rahu/Ketu).
+_PROBE_BODIES = (("Sun", swe.SUN), ("Moon", swe.MOON), ("TrueNode", swe.TRUE_NODE))
+
+
+def _source_from_retflag(retflag: int) -> str:
+    """Translate the flags swe.calc_ut REALLY used into a source name."""
+    if retflag < 0:
+        return "error"
+    if retflag & swe.FLG_JPLEPH:
+        return "jpl"
+    if retflag & swe.FLG_SWIEPH:
+        return "swiss"
+    if retflag & swe.FLG_MOSEPH:
+        return "moshier"
+    return "unknown"
+
+
+def _loaded_ephe_files() -> dict[str, Optional[str]]:
+    """Which data files the library actually has OPEN, after a calculation.
+
+    swe.get_current_file_data reports the path it TRIED even when the file was
+    never opened; in that case the Julian day span and the DE number come back as
+    zero, and that is what separates "loaded" from merely "attempted".
+    """
+    slots = {0: "planets", 1: "moon", 2: "asteroids"}
+    loaded: dict[str, Optional[str]] = {label: None for label in slots.values()}
+    for index, label in slots.items():
+        try:
+            data = swe.get_current_file_data(index)
+        except Exception:  # not exposed by every pyswisseph build
+            continue
+        if not data:
+            continue
+        path = data[0]
+        denum = data[3] if len(data) > 3 else 0
+        if path and denum:
+            loaded[label] = os.path.basename(path)
+    return loaded
+
+
+def probe_ephemeris() -> dict:
+    """Determine which ephemeris source is ACTUALLY in use, by computing with it.
+
+    Probing the directory alone is not enough (a file can be present but out of
+    range or unreadable), so we compute a known instant and read back the flags
+    swe.calc_ut reports it used. With the data files missing, FLG_SWIEPH comes back
+    cleared and FLG_MOSEPH set. That return flag is the only honest signal: the
+    longitude itself looks equally plausible either way.
+    """
+    swe.set_ephe_path(EPHE_PATH)
+    jd = swe.julday(2000, 1, 1, 12.0)  # J2000 noon: inside the span of every .se1 file
+
+    probe: dict[str, str] = {}
+    for name, planet_id in _PROBE_BODIES:
+        try:
+            _, retflag = swe.calc_ut(jd, planet_id, swe.FLG_SWIEPH)
+            probe[name] = _source_from_retflag(retflag)
+        except Exception as exc:
+            logger.warning("Ephemeris probe failed for %s: %s", name, exc)
+            probe[name] = "error"
+
+    # Chiron is the one body with no Moshier fallback: without seas_18.se1 the call
+    # raises rather than degrading, so a call that returns is proof the file is
+    # present and usable. (/astrolines already skips Chiron when this fails.)
+    try:
+        swe.calc_ut(jd, swe.CHIRON, swe.FLG_SWIEPH)
+        asteroid_file_ok = True
+    except Exception:
+        asteroid_file_ok = False
+
+    sources = set(probe.values())
+    mode = sources.pop() if len(sources) == 1 else "mixed"
+
+    all_files = EPHE_REQUIRED_FILES + EPHE_OPTIONAL_FILES
+    present = [f for f in all_files if os.path.isfile(os.path.join(EPHE_PATH, f))]
+    missing = [f for f in all_files if f not in present]
+    missing_required = [f for f in EPHE_REQUIRED_FILES if f in missing]
+
+    precision_ok = mode in ("swiss", "jpl")
+
+    if precision_ok:
+        status = "ok"
+        message = f"Full Swiss Ephemeris data in use (source={mode}, path={EPHE_PATH})."
+    else:
+        gap = ", ".join(missing_required) or "nothing on disk, but the files were not loaded"
+        detail = (
+            f"Positions are computed with the built-in Moshier theory, not the Swiss "
+            f"Ephemeris data files (source={mode}). Ephemeris path {EPHE_PATH} "
+            f"(exists={os.path.isdir(EPHE_PATH)}) is missing: {gap}."
+        )
+        if REQUIRE_FULL_PRECISION:
+            status = "failed"
+            message = (
+                "PRECISION NOT MET. " + detail + " Put the data files in that directory "
+                "(or mount them) and restart, or set SWISSEPH_REQUIRE_FULL_PRECISION=false "
+                "to accept reduced precision deliberately."
+            )
+        else:
+            status = "degraded"
+            message = (
+                "Reduced precision accepted (SWISSEPH_REQUIRE_FULL_PRECISION=false). " + detail
+            )
+
+    return {
+        "mode": mode,
+        "status": status,
+        "precision_ok": precision_ok,
+        "precision_required": REQUIRE_FULL_PRECISION,
+        "path": EPHE_PATH,
+        "path_exists": os.path.isdir(EPHE_PATH),
+        "files_required": list(EPHE_REQUIRED_FILES),
+        "files_present": present,
+        "files_missing": missing,
+        "files_loaded": _loaded_ephe_files(),
+        "asteroid_file_ok": asteroid_file_ok,
+        "probe": probe,
+        "message": message,
+    }
+
+
+# Boot check. Deliberately loud but NOT fatal: the calling app already degrades
+# gracefully when this service misbehaves (Promise.allSettled turns a failure into
+# null for the affected methods), so exiting here would trade reduced precision for a
+# total outage of vedic astrology, Human Design and the western chart. Precision that
+# silently drops is the actual problem, so we make it visible in the log and on
+# /health and leave the call to the operator.
+_BOOT_EPHEMERIS = probe_ephemeris()
+if _BOOT_EPHEMERIS["status"] == "failed":
+    logger.error("Swiss Ephemeris: %s", _BOOT_EPHEMERIS["message"])
+elif _BOOT_EPHEMERIS["status"] == "degraded":
+    logger.warning("Swiss Ephemeris: %s", _BOOT_EPHEMERIS["message"])
+else:
+    logger.info("Swiss Ephemeris: %s", _BOOT_EPHEMERIS["message"])
+logger.info(
+    "Swiss Ephemeris: source per body %s, files loaded %s, asteroid file ok=%s",
+    _BOOT_EPHEMERIS["probe"], _BOOT_EPHEMERIS["files_loaded"], _BOOT_EPHEMERIS["asteroid_file_ok"],
+)
+
 app = FastAPI(title="Swiss Ephemeris Service", version="1.0.0")
 
 # CORS only matters for browser clients. This service is normally called
@@ -238,7 +423,23 @@ def calc_planet(planet_id: int, name: str, jd: float, aya_val: float, flags: int
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "engine": "Swiss Ephemeris", "version": swe.version}
+    """Health check.
+
+    The first three keys are the original payload and keep their shape:
+    src/lib/astral/swissEphClient.ts and the deploy runbook both read them, and the
+    compose healthcheck only needs a 200. Everything under "ephemeris" is additive
+    and answers what the old payload could not: is this instance really using the
+    Swiss Ephemeris data files, or has it silently fallen back to Moshier?
+
+    The probe is re-run per request (a few cheap calculations) rather than served
+    from the boot snapshot, so mounting the files without a restart shows up here.
+    """
+    return {
+        "status": "ok",
+        "engine": "Swiss Ephemeris",
+        "version": swe.version,
+        "ephemeris": probe_ephemeris(),
+    }
 
 
 @app.post("/calculate", response_model=CalculateResponse)

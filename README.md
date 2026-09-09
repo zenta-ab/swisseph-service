@@ -40,13 +40,45 @@ Configuration via environment variables:
 - `SWISSEPH_CORS_ORIGINS` - comma-separated browser origins to allow.
   Empty by default: the service is meant to be called server-to-server over a
   private network, where CORS does not apply.
+- `SWISSEPH_REQUIRE_FULL_PRECISION` - default `true`. Decides whether running on
+  the Moshier fallback is reported as `failed` (with an ERROR at boot) or as
+  `degraded` (a WARNING). Either way the service keeps serving; see below.
+- `SWISSEPH_LOG_LEVEL` - default `INFO`.
 
 ## Ephemeris data
 
-The main bodies (Sun..Pluto and the lunar nodes) are computed via the built-in
-Moshier ephemeris, so no large data files are required. Chiron has no Moshier
-fallback, so its asteroid ephemeris (`ephe/seas_18.se1`, ~220 KB) ships with
-the service.
+Only `ephe/seas_18.se1` (~220 KB, the asteroid file Chiron needs) ships with the
+service. The main bodies (Sun..Pluto and the lunar nodes) therefore fall back to
+the built-in Moshier analytical ephemeris, which needs no data files but is
+coarser than the Swiss Ephemeris files.
+
+That fallback is silent by design in the underlying library: `swe.calc_ut` with
+`FLG_SWIEPH` does not raise when `sepl_18.se1` / `semo_18.se1` are absent, it
+just returns Moshier positions that look exactly as plausible. To make it
+visible, the service computes a known instant at startup and reads back the
+flags the library actually used, then logs the result and reports it on
+`/health`:
+
+```json
+{
+  "status": "ok",
+  "engine": "Swiss Ephemeris",
+  "version": "2.10.03",
+  "ephemeris": {
+    "mode": "moshier",
+    "status": "failed",
+    "precision_ok": false,
+    "path": "/app/ephe",
+    "files_missing": ["sepl_18.se1", "semo_18.se1"]
+  }
+}
+```
+
+For full precision, put `sepl_18.se1` and `semo_18.se1` in the ephemeris
+directory (bake them into the image or mount them) and restart; `mode` then
+reads `swiss`. Reduced precision never stops the service: callers commonly
+degrade gracefully when it is unreachable, and exiting would turn a precision
+issue into an outage. It is made loud instead.
 
 ## License
 
