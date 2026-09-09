@@ -2,8 +2,16 @@
 __pycache__/
 *.pyc
 ephe/*.se1
-# Exception: Chiron's asteroid ephemeris is REQUIRED (it has no Moshier
-# fallback, unlike Sun-Pluto). It is small (~220 KB) and must ship in the
-# Docker image, so it has to be tracked.
+# Exceptions: these three files ship in the Docker image instead of relying
+# on pyswisseph's Moshier analytical fallback. Moshier is close enough for
+# most callers (~0.1 arcsec for planets, ~3 arcsec for the Moon versus
+# 0.001 arcsec with these files), but some callers read subdivisions fine
+# enough that the Moshier Moon error matters: a Human Design tone spans
+# 93.75 arcsec, and the Sense Variable comes from the Design Nodes tone,
+# which derives from the lunar orbit, so a ~3 arcsec Moshier error can put
+# a chart in the wrong tone. Chiron additionally has no Moshier fallback
+# at all, so it must ship regardless.
 !ephe/seas_18.se1
+!ephe/sepl_18.se1
+!ephe/semo_18.se1
 ephe/sefstars.txt

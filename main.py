@@ -61,23 +61,26 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
-# Does reduced precision count as a failure? Default NO, deliberately.
+# Does reduced precision count as a failure? Default YES, deliberately.
 #
-# .gitignore excludes ephe/*.se1 on purpose and keeps only seas_18.se1, because
-# Chiron has no analytical fallback while Sun to Pluto do. So the Moshier fallback
-# is the intended configuration, not an accident, and flagging it as "failed"
-# would cry wolf on every deploy.
+# sepl_18.se1 and semo_18.se1 (plus seas_18.se1 for Chiron) ship in the Docker
+# image, so full Swiss Ephemeris precision is the expected state on every deploy.
+# A fallback to Moshier now means something is genuinely wrong with the image
+# (files missing, wrong path, bad mount) rather than an accepted configuration,
+# so the check reports "failed" instead of quietly calling it "degraded".
 #
-# The margins justify that choice. Moshier deviates from JPL by about 0.1 arcsec
-# for the planets and about 3 arcsec for the Moon; the ephemeris files would buy
-# 0.001 arcsec. The finest thing any caller reads is a Human Design tone at 93.75
-# arcsec, and the two tone-bearing arrows come from the Sun, whose error is ~0.1
-# arcsec, i.e. about a thousandth of a tone. Nakshatra padas (12000 arcsec) and
-# gate boundaries (20250 arcsec) are orders of magnitude coarser still.
+# The reason the files are worth shipping at all: Moshier deviates from JPL by
+# about 0.1 arcsec for the planets and about 3 arcsec for the Moon; the ephemeris
+# files buy 0.001 arcsec. That margin is fine for most callers, but not for the
+# Design Nodes tone the Human Design Sense Variable is read from - a tone spans
+# only 93.75 arcsec, and the nodes derive from the lunar orbit, so a ~3 arcsec
+# Moshier error on the Moon can put roughly 3% of charts in the wrong tone. That
+# gap is why the files were added and why this now defaults to strict.
 #
-# Set SWISSEPH_REQUIRE_FULL_PRECISION=true if you ship the files and want the
-# service to insist on them; the check then reports "failed" instead of "degraded".
-REQUIRE_FULL_PRECISION = _env_flag("SWISSEPH_REQUIRE_FULL_PRECISION", False)
+# Set SWISSEPH_REQUIRE_FULL_PRECISION=false only to deliberately accept reduced
+# precision (e.g. local dev without the data files); the check then reports
+# "degraded" instead of "failed".
+REQUIRE_FULL_PRECISION = _env_flag("SWISSEPH_REQUIRE_FULL_PRECISION", True)
 
 # Sun, Moon and the true node are the bodies whose precision the callers are most
 # sensitive to (Human Design tones, nakshatra padas, Rahu/Ketu).
